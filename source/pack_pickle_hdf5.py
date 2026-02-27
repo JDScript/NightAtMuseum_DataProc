@@ -9,7 +9,7 @@ HDF5 layout (output):
     data_split/train               string[]  — paths like "animal/seq_name"
     data_split/val                 string[]
 
-Split strategy: 80/20 by species (all variants of a species go to the same split).
+Split strategy: natsort all sequence paths, fixed-seed shuffle, 80/20 split.
 
 Usage:
     uv run python source/pack_pickle_hdf5.py
@@ -19,26 +19,19 @@ Usage:
 import dataclasses
 import pickle
 import random
-from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import h5py
 import numpy as np
 import tyro
+from natsort import natsorted
 from tqdm import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-
-def get_species(animal_name: str) -> str:
-    for s in ("_Male", "_Female", "_Juvenile"):
-        if animal_name.endswith(s):
-            return animal_name[: -len(s)]
-    return animal_name
 
 
 def read_one_pkl(pkl_path: Path) -> tuple[str, str, np.ndarray, np.ndarray] | None:
@@ -73,7 +66,7 @@ class Args:
     """Number of parallel workers for reading pickles."""
 
     val_ratio: float = 0.2
-    """Fraction of species held out for validation."""
+    """Fraction of sequences held out for validation."""
 
     seed: int = 42
     """Random seed for split."""
@@ -83,43 +76,27 @@ class Args:
 
 
 def main(args: Args):
-    # 1. Discover all pickle files
-    all_pkls = sorted(args.pkl_dir.glob("*/*.pkl"))
+    # 1. Discover all pickle files, natsort for deterministic ordering
+    all_pkls = natsorted(args.pkl_dir.glob("*/*.pkl"), key=str)
     if not all_pkls:
         print(f"No pickle files found in {args.pkl_dir}")
         return
     print(f"Found {len(all_pkls):,} pickle files")
 
-    # 2. Group by species for split
-    species_to_animals = defaultdict(set)
-    animal_to_pkls = defaultdict(list)
-    for p in all_pkls:
-        animal = p.parent.name
-        species = get_species(animal)
-        species_to_animals[species].add(animal)
-        animal_to_pkls[animal].append(p)
-
-    all_species = sorted(species_to_animals.keys())
+    # 2. Build path list, shuffle with fixed seed, split
+    all_paths = [f"{p.parent.name}/{p.stem}" for p in all_pkls]
+    indices = list(range(len(all_pkls)))
     rng = random.Random(args.seed)
-    rng.shuffle(all_species)
+    rng.shuffle(indices)
 
-    n_val = max(1, int(len(all_species) * args.val_ratio))
-    val_species = set(all_species[:n_val])
-    train_species = set(all_species[n_val:])
+    n_val = max(1, int(len(indices) * args.val_ratio))
+    val_indices = set(indices[:n_val])
 
-    train_animals = {a for sp in train_species for a in species_to_animals[sp]}
-    val_animals = {a for sp in val_species for a in species_to_animals[sp]}
-
-    train_pkls = [p for p in all_pkls if p.parent.name in train_animals]
-    val_pkls = [p for p in all_pkls if p.parent.name in val_animals]
-
-    print(f"Species: {len(all_species)} total, {len(train_species)} train, {len(val_species)} val")
-    print(f"Animals: {len(train_animals)} train, {len(val_animals)} val")
-    print(f"Sequences: {len(train_pkls):,} train, {len(val_pkls):,} val")
+    train_paths = [all_paths[i] for i in indices[n_val:]]
+    val_paths = [all_paths[i] for i in indices[:n_val]]
+    print(f"Split: {len(train_paths):,} train, {len(val_paths):,} val")
 
     # 3. Pack into HDF5 with multiprocess reading
-    train_paths = []
-    val_paths = []
     errors = 0
 
     with h5py.File(args.output, "w") as hf:
@@ -141,11 +118,6 @@ def main(args: Args):
                 grp.create_dataset("vertices", data=verts, compression="gzip", compression_opts=4)
                 grp.create_dataset("faces", data=faces, compression="gzip", compression_opts=4)
 
-                if animal in train_animals:
-                    train_paths.append(grp_path)
-                else:
-                    val_paths.append(grp_path)
-
             pbar.close()
 
         # 4. Write split info
@@ -154,9 +126,6 @@ def main(args: Args):
         split_grp.create_dataset("train", data=np.array(train_paths, dtype=object), dtype=dt)
         split_grp.create_dataset("val", data=np.array(val_paths, dtype=object), dtype=dt)
 
-        # Metadata
-        hf.attrs["n_species_train"] = len(train_species)
-        hf.attrs["n_species_val"] = len(val_species)
         hf.attrs["n_train"] = len(train_paths)
         hf.attrs["n_val"] = len(val_paths)
         hf.attrs["seed"] = args.seed

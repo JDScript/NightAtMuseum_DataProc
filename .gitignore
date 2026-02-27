@@ -14,3 +14,9 @@ third_party/blender
 
 # Data
 data/
+
+# Logs
+logs/
+
+# Claude
+.claude/

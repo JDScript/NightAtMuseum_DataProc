@@ -1,19 +1,13 @@
-"""Pack pickle mesh sequences into HDF5 with delta encoding and train/val split.
+"""Pack pickle mesh sequences into HDF5 with train/val split.
 
 Directory layout (input):  data_pickle/{animal}/{name}.pkl
 Each pkl: {"vertices": (F, V, 3) float64, "faces": (N, 3) int64}
 
-HDF5 layout (output) — delta encoded like DeformingThings4D .anime format:
-    {animal}/{seq_name}/verts_0    (V, 3)       float32  — first frame (rest pose)
-    {animal}/{seq_name}/offsets    (F-1, V, 3)  float32  — per-frame delta from frame 0
-    {animal}/{seq_name}/faces      (N, 3)       int32    — topology (fixed across frames)
+HDF5 layout (output):
+    {animal}/{seq_name}/vertices   (F, V, 3) float32
+    {animal}/{seq_name}/faces      (N, 3)    int32
     data_split/train               string[]  — paths like "animal/seq_name"
     data_split/val                 string[]
-
-Delta encoding: offsets[i] = vertices[i+1] - vertices[0].  Offsets are small values
-centered around zero, which compress much better than absolute positions.
-
-To reconstruct frame k:  vertices[k] = verts_0 + offsets[k-1]  (k >= 1)
 
 Split strategy: natsort all sequence paths, fixed-seed shuffle, 80/20 split.
 
@@ -40,26 +34,16 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def read_one_pkl(pkl_path: Path) -> tuple[str, str, np.ndarray, np.ndarray, np.ndarray] | None:
-    """Read a single pickle and compute delta encoding.
-
-    Returns (animal, seq_name, verts_0, offsets, faces) or None.
-        verts_0:  (V, 3) float32  — first frame
-        offsets:  (F-1, V, 3) float32  — delta from frame 0 for frames 1..F-1
-        faces:    (N, 3) int32
-    """
+def read_one_pkl(pkl_path: Path) -> tuple[str, str, np.ndarray, np.ndarray] | None:
+    """Read a single pickle. Returns (animal, seq_name, vertices, faces) or None."""
     try:
         with open(pkl_path, "rb") as f:
             data = pickle.load(f)
         verts = data["vertices"].astype(np.float32)  # (F, V, 3)
         faces = data["faces"].astype(np.int32)  # (N, 3)
-
-        verts_0 = verts[0]  # (V, 3)
-        offsets = verts[1:] - verts_0  # (F-1, V, 3)
-
         animal = pkl_path.parent.name
         seq_name = pkl_path.stem
-        return (animal, seq_name, verts_0, offsets, faces)
+        return (animal, seq_name, verts, faces)
     except Exception as e:
         print(f"  WARN: failed to read {pkl_path}: {e}")
         return None
@@ -129,13 +113,12 @@ def main(args: Args):
                         errors += 1
                         continue
 
-                    animal, seq_name, verts_0, offsets, faces = result
+                    animal, seq_name, verts, faces = result
                     grp_path = f"{animal}/{seq_name}"
 
                     grp = hf.create_group(grp_path)
-                    grp.create_dataset("verts_0", data=verts_0, compression="gzip", compression_opts=4)
-                    grp.create_dataset("offsets", data=offsets, compression="gzip", compression_opts=4)
-                    grp.create_dataset("faces", data=faces, compression="gzip", compression_opts=4)
+                    grp.create_dataset("vertices", data=verts)
+                    grp.create_dataset("faces", data=faces)
 
         pbar.close()
 
@@ -145,7 +128,7 @@ def main(args: Args):
         split_grp.create_dataset("train", data=np.array(train_paths, dtype=object), dtype=dt)
         split_grp.create_dataset("val", data=np.array(val_paths, dtype=object), dtype=dt)
 
-        hf.attrs["format"] = "mesh_sequence_delta"
+        hf.attrs["format"] = "mesh_sequence"
         hf.attrs["n_train"] = len(train_paths)
         hf.attrs["n_val"] = len(val_paths)
         hf.attrs["seed"] = args.seed

@@ -12,6 +12,7 @@ import dataclasses
 import json
 import struct
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -30,7 +31,7 @@ def read_glb_json(filepath: Path) -> dict | None:
     try:
         with open(filepath, "rb") as f:
             # GLB header: magic(4) + version(4) + length(4)
-            magic, version, length = struct.unpack("<III", f.read(12))
+            magic, _version, _length = struct.unpack("<III", f.read(12))
             if magic != 0x46546C67:  # 'glTF'
                 return None
             # First chunk: length(4) + type(4) + data
@@ -114,35 +115,42 @@ class Args:
     outdir: Path = PROJECT_ROOT / "figures"
     """Output directory for figures."""
 
+    workers: int = 8
+    """Number of parallel workers for GLB parsing."""
+
 
 # ── Scanning ─────────────────────────────────────────────────────────────────
 
 
-def scan_glbs(glb_dir: Path) -> list[dict]:
-    """Scan all GLB files and return list of records."""
-    animal_dirs = sorted(d for d in glb_dir.iterdir() if d.is_dir())
+def _process_one_glb(glb_path: Path) -> dict | None:
+    """Worker function: parse one GLB and return a record."""
+    info = get_animation_info(glb_path)
+    if info is None:
+        return None
+    animal_name = glb_path.parent.name
+    return {
+        "animal": animal_name,
+        "species": get_species(animal_name),
+        "category": get_category(animal_name),
+        "glb": glb_path.name,
+        **info,
+    }
+
+
+def scan_glbs(glb_dir: Path, workers: int) -> list[dict]:
+    """Scan all GLB files using multiprocessing and return list of records."""
+    all_glbs = sorted(glb_dir.glob("*/*.glb"))
+    if not all_glbs:
+        return []
+
     records = []
-
-    for animal_dir in tqdm(animal_dirs, desc="Scanning animals", unit="dir"):
-        glb_files = sorted(animal_dir.glob("*.glb"))
-        if not glb_files:
-            continue
-
-        animal_name = animal_dir.name
-        species = get_species(animal_name)
-        category = get_category(animal_name)
-
-        for glb_path in glb_files:
-            info = get_animation_info(glb_path)
-            if info is None:
-                continue
-            records.append({
-                "animal": animal_name,
-                "species": species,
-                "category": category,
-                "glb": glb_path.name,
-                **info,
-            })
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_process_one_glb, p): p for p in all_glbs}
+        for future in tqdm(as_completed(futures), total=len(all_glbs),
+                           desc="Parsing GLBs", unit="file"):
+            result = future.result()
+            if result is not None:
+                records.append(result)
 
     return records
 
@@ -302,7 +310,7 @@ def plot_all(records: list[dict], outdir: Path):
 
 
 def main(args: Args):
-    records = scan_glbs(args.glb_dir)
+    records = scan_glbs(args.glb_dir, args.workers)
 
     if not records:
         print("No GLB animations found.")

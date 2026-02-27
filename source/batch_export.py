@@ -3,6 +3,9 @@
 Usage:
     uv run python source/batch_export.py --workers 8
     uv run python source/batch_export.py --workers 4 --filter "Aardvark*"
+
+    # HPC chunking (used by SLURM array jobs):
+    uv run python source/batch_export.py --workers 16 --chunk-id 0 --num-chunks 8
 """
 
 import argparse
@@ -107,6 +110,8 @@ def main():
     parser.add_argument("--filter", type=str, default="*", help="Glob pattern to filter animals (e.g. 'Aardvark*')")
     parser.add_argument("--ovl-dir", type=Path, default=OVL_DIR)
     parser.add_argument("--glb-dir", type=Path, default=GLB_DIR)
+    parser.add_argument("--chunk-id", type=int, default=None, help="Chunk index for SLURM array jobs (0-based)")
+    parser.add_argument("--num-chunks", type=int, default=None, help="Total number of chunks for SLURM array jobs")
     args = parser.parse_args()
 
     if not BLENDER_BIN.exists():
@@ -114,7 +119,17 @@ def main():
         sys.exit(1)
 
     animals = discover_animals(args.ovl_dir, args.filter)
-    log.info(f"Found {len(animals)} animals to process with {args.workers} workers")
+    total_animals = len(animals)
+
+    # Chunk for SLURM array jobs
+    if args.chunk_id is not None and args.num_chunks is not None:
+        chunk_size = (len(animals) + args.num_chunks - 1) // args.num_chunks
+        start = args.chunk_id * chunk_size
+        end = min(start + chunk_size, len(animals))
+        animals = animals[start:end]
+        log.info(f"Chunk {args.chunk_id}/{args.num_chunks}: animals [{start}:{end}] of {total_animals}")
+
+    log.info(f"Processing {len(animals)} animals with {args.workers} workers")
 
     args.glb_dir.mkdir(parents=True, exist_ok=True)
 

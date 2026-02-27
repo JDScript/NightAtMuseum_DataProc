@@ -125,12 +125,25 @@ def scan_all(args: Args) -> tuple[dict, list]:
             "by_pair": defaultdict(int),
         }
 
+        # Derive animal_prefix from ms2 (same logic as blender_export_glb.py)
+        ms2_files = list(ovl_path.glob("*.ms2"))
+        if ms2_files:
+            ms2_stem = ms2_files[0].stem  # e.g. "aardvark_female_"
+            animal_prefix = ms2_stem.rstrip("_").lower()
+        else:
+            # No ms2 — fall back to counting all actions
+            animal_prefix = None
+
         for manis_path in manis_files:
             motion, action = classify_manis(manis_path.name)
             try:
                 mf = ManisFile()
                 mf.load(str(manis_path))
-                count = len(mf.mani_infos)
+                if animal_prefix is not None:
+                    matched = [mi for mi in mf.mani_infos if animal_prefix in mi.name.lower()]
+                    count = len(matched)
+                else:
+                    count = len(mf.mani_infos)
             except Exception as e:
                 errors.append((animal_name, manis_path.name, str(e)))
                 continue
@@ -156,6 +169,14 @@ def get_species(animal_name: str) -> str:
         if animal_name.endswith(s):
             return animal_name[: -len(s)]
     return animal_name
+
+
+def get_category(animal_name: str) -> str:
+    """'Bengal_Tiger_Male' -> 'Male', 'Aardvark_Juvenile' -> 'Juvenile'."""
+    for s in ("Male", "Female", "Juvenile"):
+        if animal_name.endswith(s):
+            return s
+    return "Other"
 
 
 # ── Printing ─────────────────────────────────────────────────────────────────
@@ -296,6 +317,51 @@ def print_species_summary(animal_stats: dict):
     print(f"\nUnique species: {len(species_data)}")
 
 
+def print_category_summary(animal_stats: dict):
+    """Print breakdown by category (Male/Female/Juvenile)."""
+    print_header("BY CATEGORY (Male / Female / Juvenile)")
+
+    all_actions = sorted({a for s in animal_stats.values() for a in s["by_action"]})
+
+    cat_data: dict[str, dict] = {}
+    for name, s in animal_stats.items():
+        cat = get_category(name)
+        if cat not in cat_data:
+            cat_data[cat] = {"count": 0, "total": 0, "by_action": defaultdict(int)}
+        cat_data[cat]["count"] += 1
+        cat_data[cat]["total"] += s["total"]
+        for a, c in s["by_action"].items():
+            cat_data[cat]["by_action"][a] += c
+
+    col_w = max(10, max((len(a) for a in all_actions), default=0) + 2)
+    lbl_w = 16
+
+    print(f"\n{'Category':<{lbl_w}} {'Animals':>8} {'Total':>8}", end="")
+    for a in all_actions:
+        print(f"{a:>{col_w}}", end="")
+    print()
+    print("-" * (lbl_w + 8 + 8 + col_w * len(all_actions)))
+
+    for cat in ["Male", "Female", "Juvenile", "Other"]:
+        if cat not in cat_data:
+            continue
+        d = cat_data[cat]
+        print(f"{cat:<{lbl_w}} {d['count']:>8} {d['total']:>8,}", end="")
+        for a in all_actions:
+            v = d["by_action"].get(a, 0)
+            print(f"{v:>{col_w},}" if v else f"{'—':>{col_w}}", end="")
+        print()
+
+    print("-" * (lbl_w + 8 + 8 + col_w * len(all_actions)))
+    total_animals = sum(d["count"] for d in cat_data.values())
+    total_clips = sum(d["total"] for d in cat_data.values())
+    print(f"{'TOTAL':<{lbl_w}} {total_animals:>8} {total_clips:>8,}", end="")
+    for a in all_actions:
+        v = sum(d["by_action"].get(a, 0) for d in cat_data.values())
+        print(f"{v:>{col_w},}", end="")
+    print()
+
+
 def print_per_animal(animal_stats: dict):
     """Print per-animal breakdown."""
     print_header("PER ANIMAL")
@@ -352,6 +418,7 @@ def main(args: Args):
     print_motion_x_action_table(animal_stats)
     print_action_summary(animal_stats)
     print_motion_summary(animal_stats)
+    print_category_summary(animal_stats)
     print_species_summary(animal_stats)
     print_per_animal(animal_stats)
     print_errors(errors)

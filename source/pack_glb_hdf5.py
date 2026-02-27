@@ -1,11 +1,10 @@
 """Pack GLB animation files into HDF5 with train/val split.
 
 Directory layout (input):  data/glb/{animal}/{name}.glb
-Each GLB: single skeletal animation with mesh.
+Each GLB: single skeletal animation with mesh, stored as raw bytes.
 
 HDF5 layout (output):
     {animal}/{glb_name}/glb        (N,) uint8  — raw GLB bytes
-    {animal}/{glb_name}/            attrs: frame_count, duration, n_vertices, n_faces
     data_split/train               string[]  — paths like "animal/glb_name"
     data_split/val                 string[]
 
@@ -17,10 +16,8 @@ Usage:
 """
 
 import dataclasses
-import json
 import random
-import struct
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import h5py
@@ -35,49 +32,11 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 
-def read_one_glb(glb_path: Path) -> tuple[str, str, bytes, dict] | None:
-    """Read a single GLB. Returns (animal, name, raw_bytes, metadata) or None."""
+def read_one_glb(glb_path: Path) -> tuple[str, str, bytes] | None:
+    """Read a single GLB. Returns (animal, clip_name, raw_bytes) or None."""
     try:
         raw = glb_path.read_bytes()
-        # Parse JSON chunk for metadata
-        meta = {}
-        if len(raw) >= 20:
-            magic, _ver, _total = struct.unpack_from("<III", raw, 0)
-            if magic == 0x46546C67:
-                chunk_len, chunk_type = struct.unpack_from("<II", raw, 12)
-                if chunk_type == 0x4E4F534A:
-                    gltf = json.loads(raw[20 : 20 + chunk_len])
-                    # Extract animation info
-                    anims = gltf.get("animations", [])
-                    accessors = gltf.get("accessors", [])
-                    if anims:
-                        anim = anims[0]
-                        max_time = 0.0
-                        max_frames = 0
-                        for s in anim.get("samplers", []):
-                            idx = s.get("input")
-                            if idx is not None and idx < len(accessors):
-                                acc = accessors[idx]
-                                t = acc.get("max", [0])
-                                if isinstance(t, list) and t:
-                                    max_time = max(max_time, t[0])
-                                max_frames = max(max_frames, acc.get("count", 0))
-                        meta["frame_count"] = max_frames
-                        meta["duration"] = max_time
-                    # Mesh info
-                    meshes = gltf.get("meshes", [])
-                    if meshes:
-                        prim = meshes[0].get("primitives", [{}])[0]
-                        pos_idx = prim.get("attributes", {}).get("POSITION")
-                        idx_idx = prim.get("indices")
-                        if pos_idx is not None and pos_idx < len(accessors):
-                            meta["n_vertices"] = accessors[pos_idx].get("count", 0)
-                        if idx_idx is not None and idx_idx < len(accessors):
-                            meta["n_faces"] = accessors[idx_idx].get("count", 0) // 3
-
-        animal = glb_path.parent.name
-        name = glb_path.stem
-        return (animal, name, raw, meta)
+        return (glb_path.parent.name, glb_path.stem, raw)
     except Exception as e:
         print(f"  WARN: failed to read {glb_path}: {e}")
         return None
@@ -98,6 +57,9 @@ class Args:
 
     workers: int = 8
     """Number of parallel workers for reading GLBs."""
+
+    batch_size: int = 256
+    """Number of files to read per batch (controls peak memory)."""
 
     val_ratio: float = 0.2
     """Fraction of sequences held out for validation."""
@@ -124,42 +86,39 @@ def main(args: Args):
     rng.shuffle(indices)
 
     n_val = max(1, int(len(indices) * args.val_ratio))
-
     train_paths = [all_paths[i] for i in indices[n_val:]]
     val_paths = [all_paths[i] for i in indices[:n_val]]
     print(f"Split: {len(train_paths):,} train, {len(val_paths):,} val")
 
-    # 3. Pack into HDF5 with multiprocess reading
+    # 3. Pack into HDF5 — batched parallel reads to bound memory
     errors = 0
 
     with h5py.File(args.output, "w") as hf:
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(read_one_glb, p): p for p in all_glbs}
-            pbar = tqdm(total=len(all_glbs), desc="Packing", unit="glb")
+        pbar = tqdm(total=len(all_glbs), desc="Packing", unit="glb")
 
-            for future in as_completed(futures):
-                result = future.result()
-                pbar.update(1)
-                if result is None:
-                    errors += 1
-                    continue
+        for batch_start in range(0, len(all_glbs), args.batch_size):
+            batch = all_glbs[batch_start : batch_start + args.batch_size]
 
-                animal, name, raw, meta = result
-                grp_path = f"{animal}/{name}"
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                for result in pool.map(read_one_glb, batch):
+                    pbar.update(1)
+                    if result is None:
+                        errors += 1
+                        continue
 
-                grp = hf.create_group(grp_path)
-                grp.create_dataset("glb", data=np.frombuffer(raw, dtype=np.uint8))
-                for k, v in meta.items():
-                    grp.attrs[k] = v
+                    animal, name, raw = result
+                    grp = hf.create_group(f"{animal}/{name}")
+                    grp.create_dataset("glb", data=np.frombuffer(raw, dtype=np.uint8))
 
-            pbar.close()
+        pbar.close()
 
-        # 4. Write split info
+        # 4. Write split info + metadata
         dt = h5py.string_dtype()
         split_grp = hf.create_group("data_split")
         split_grp.create_dataset("train", data=np.array(train_paths, dtype=object), dtype=dt)
         split_grp.create_dataset("val", data=np.array(val_paths, dtype=object), dtype=dt)
 
+        hf.attrs["format"] = "raw_glb"
         hf.attrs["n_train"] = len(train_paths)
         hf.attrs["n_val"] = len(val_paths)
         hf.attrs["seed"] = args.seed

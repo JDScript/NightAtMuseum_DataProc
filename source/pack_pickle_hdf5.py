@@ -19,7 +19,7 @@ Usage:
 import dataclasses
 import pickle
 import random
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import h5py
@@ -65,6 +65,9 @@ class Args:
     workers: int = 8
     """Number of parallel workers for reading pickles."""
 
+    batch_size: int = 32
+    """Number of files to read per batch (controls peak memory)."""
+
     val_ratio: float = 0.2
     """Fraction of sequences held out for validation."""
 
@@ -90,35 +93,34 @@ def main(args: Args):
     rng.shuffle(indices)
 
     n_val = max(1, int(len(indices) * args.val_ratio))
-    val_indices = set(indices[:n_val])
-
     train_paths = [all_paths[i] for i in indices[n_val:]]
     val_paths = [all_paths[i] for i in indices[:n_val]]
     print(f"Split: {len(train_paths):,} train, {len(val_paths):,} val")
 
-    # 3. Pack into HDF5 with multiprocess reading
+    # 3. Pack into HDF5 — batched parallel reads to bound memory
     errors = 0
 
     with h5py.File(args.output, "w") as hf:
-        with ProcessPoolExecutor(max_workers=args.workers) as pool:
-            futures = {pool.submit(read_one_pkl, p): p for p in all_pkls}
-            pbar = tqdm(total=len(all_pkls), desc="Packing", unit="seq")
+        pbar = tqdm(total=len(all_pkls), desc="Packing", unit="seq")
 
-            for future in as_completed(futures):
-                result = future.result()
-                pbar.update(1)
-                if result is None:
-                    errors += 1
-                    continue
+        for batch_start in range(0, len(all_pkls), args.batch_size):
+            batch = all_pkls[batch_start : batch_start + args.batch_size]
 
-                animal, seq_name, verts, faces = result
-                grp_path = f"{animal}/{seq_name}"
+            with ProcessPoolExecutor(max_workers=args.workers) as pool:
+                for result in pool.map(read_one_pkl, batch):
+                    pbar.update(1)
+                    if result is None:
+                        errors += 1
+                        continue
 
-                grp = hf.create_group(grp_path)
-                grp.create_dataset("vertices", data=verts, compression="gzip", compression_opts=4)
-                grp.create_dataset("faces", data=faces, compression="gzip", compression_opts=4)
+                    animal, seq_name, verts, faces = result
+                    grp_path = f"{animal}/{seq_name}"
 
-            pbar.close()
+                    grp = hf.create_group(grp_path)
+                    grp.create_dataset("vertices", data=verts, compression="gzip", compression_opts=4)
+                    grp.create_dataset("faces", data=faces, compression="gzip", compression_opts=4)
+
+        pbar.close()
 
         # 4. Write split info
         dt = h5py.string_dtype()
@@ -126,6 +128,7 @@ def main(args: Args):
         split_grp.create_dataset("train", data=np.array(train_paths, dtype=object), dtype=dt)
         split_grp.create_dataset("val", data=np.array(val_paths, dtype=object), dtype=dt)
 
+        hf.attrs["format"] = "mesh_sequence"
         hf.attrs["n_train"] = len(train_paths)
         hf.attrs["n_val"] = len(val_paths)
         hf.attrs["seed"] = args.seed

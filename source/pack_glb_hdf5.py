@@ -108,7 +108,7 @@ def main(args: Args):
 
                     animal, name, raw = result
                     grp = hf.create_group(f"{animal}/{name}")
-                    grp.create_dataset("glb", data=np.frombuffer(raw, dtype=np.uint8))
+                    grp.create_dataset("glb", data=np.frombuffer(raw, dtype=np.uint8), compression="lzf")
 
         pbar.close()
 

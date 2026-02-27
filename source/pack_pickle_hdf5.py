@@ -56,7 +56,7 @@ def read_one_pkl(pkl_path: Path) -> tuple[str, str, np.ndarray, np.ndarray] | No
 class Args:
     """Pack pickle mesh sequences into HDF5."""
 
-    pkl_dir: Path = PROJECT_ROOT / "data_pickle"
+    pkl_dir: Path = Path("/scratch/cx2219/animal4d/pkl_result/mesh_output")
     """Input directory with {animal}/{name}.pkl structure."""
 
     output: Path = PROJECT_ROOT / "data_pickle.hdf5"

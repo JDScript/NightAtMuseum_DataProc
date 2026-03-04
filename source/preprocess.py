@@ -304,6 +304,21 @@ def main(args: Args):
     chunk_label = f"{dataset_name}_chunk_{args.chunk_id:04d}" if args.chunk_id is not None else f"{dataset_name}_chunk_local"
     hdf5_tmp_path = Path(tmpdir) / f"{chunk_label}.hdf5"
     hdf5_final_path = dataset_out_dir / f"{chunk_label}.hdf5"
+    status_path = dataset_out_dir / f"{chunk_label}_status.json"
+
+    # Skip if chunk already completed successfully
+    if status_path.exists():
+        try:
+            prev = json.loads(status_path.read_text())
+            if prev.get("ok", 0) == len(manifest) and prev.get("errors", -1) == 0:
+                log.info(f"Chunk already complete ({prev['ok']} ok), skipping")
+                return
+            log.info(
+                f"Previous run incomplete (ok={prev.get('ok')}, "
+                f"errors={prev.get('errors')}), reprocessing"
+            )
+        except Exception:
+            pass
 
     # Check blender
     if not BLENDER_BIN.exists():
@@ -397,7 +412,6 @@ def main(args: Args):
             log.info(f"  ... and {len(errors) - 20} more")
 
     # Write status JSON
-    status_path = dataset_out_dir / f"{chunk_label}_status.json"
     status_path.write_text(
         json.dumps(
             {

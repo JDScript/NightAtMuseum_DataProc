@@ -10,10 +10,11 @@ HDF5 layout (output):
     data_split/val                 string[]
 
 Split strategy: natsort all sequence paths, fixed-seed shuffle, 80/20 split.
+Optional --clean-list to only include sequences listed in a text file.
 
 Usage:
     uv run python source/pack_pickle_hdf5.py
-    uv run python source/pack_pickle_hdf5.py --pkl-dir data_pickle --output data_pickle.hdf5 --workers 8
+    uv run python source/pack_pickle_hdf5.py --clean-list clean_sequence.txt
 """
 
 import dataclasses
@@ -62,6 +63,9 @@ class Args:
     output: Path = PROJECT_ROOT / "data_pickle.hdf5"
     """Output HDF5 file path."""
 
+    clean_list: Path | None = None
+    """Optional text file with one 'animal/seq_name' per line. Only these sequences are packed."""
+
     workers: int = 8
     """Number of parallel workers for reading pickles."""
 
@@ -85,6 +89,17 @@ def main(args: Args):
         print(f"No pickle files found in {args.pkl_dir}")
         return
     print(f"Found {len(all_pkls):,} pickle files")
+
+    # 1b. Filter by clean list if provided
+    if args.clean_list is not None:
+        clean_set = set()
+        with open(args.clean_list) as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    clean_set.add(line)
+        all_pkls = [p for p in all_pkls if f"{p.parent.name}/{p.stem}" in clean_set]
+        print(f"Filtered to {len(all_pkls):,} sequences via {args.clean_list}")
 
     # 2. Build path list, shuffle with fixed seed, split
     all_paths = [f"{p.parent.name}/{p.stem}" for p in all_pkls]

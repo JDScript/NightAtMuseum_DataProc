@@ -15,9 +15,16 @@ dependencies = [
     "trimesh>=4.11.2",
     "tyro>=1.0.6",
     "open3d>=0.18.0",
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "transformers>=5.2.0",
+    "utils3d",
 ]
 
 [dependency-groups]
 dev = [
     "ipykernel>=7.2.0",
 ]
+
+[tool.uv.sources]
+utils3d = { git = "https://github.com/EasternJournalist/utils3d.git", rev = "9a4eb15e4021b67b12c460c7057d642626897ec8" }

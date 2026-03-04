@@ -1,12 +1,11 @@
 #!/bin/bash
 #SBATCH --job-name=trellis_preproc
-#SBATCH --account=torch_pr_49_tandon_advanced
+#SBATCH --account=torch_pr_52_tandon_priority
 #SBATCH --nodes=1
 #SBATCH --tasks-per-node=1
-#SBATCH --qos=cpu48 
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=32GB
-#SBATCH --time=4:00:00
+#SBATCH --mem=8GB
+#SBATCH --time=3:00:00
 #SBATCH --output=logs/preproc_%A_%a.out
 #SBATCH --error=logs/preproc_%A_%a.err
 

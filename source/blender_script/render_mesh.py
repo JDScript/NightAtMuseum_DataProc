@@ -87,6 +87,24 @@ def load_object(object_path: str):
         raise ValueError(f"Unsupported file type: {ext}")
 
 
+def remove_orphan_meshes():
+    """Remove parentless mesh objects (e.g. bounding Icospheres from GLB export).
+
+    Actual animal meshes are children of an armature; orphan meshes like
+    Icosphere distort the bounding box and make normalization wrong.
+    """
+    has_armature = any(obj.type == "ARMATURE" for obj in bpy.context.scene.objects)
+    if not has_armature:
+        return
+    to_remove = [
+        obj for obj in bpy.context.scene.objects
+        if obj.type == "MESH" and obj.parent is None
+    ]
+    for obj in to_remove:
+        print(f"[INFO] Removing orphan mesh: {obj.name}")
+        bpy.data.objects.remove(obj, do_unlink=True)
+
+
 def delete_invisible_objects():
     bpy.ops.object.select_all(action="DESELECT")
     for obj in bpy.context.scene.objects:
@@ -252,6 +270,7 @@ def main(arg):
     init_render(engine=arg.engine, resolution=arg.resolution, samples=arg.samples)
     init_scene()
     load_object(arg.object)
+    remove_orphan_meshes()
     print("[INFO] Scene initialized.")
 
     # Normalize to unit cube
